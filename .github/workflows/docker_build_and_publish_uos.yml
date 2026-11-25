@@ -172,14 +172,10 @@ jobs:
   build-and-publish:
     name: Build ${{ matrix.variant }} (${{ matrix.platform }})
     needs: detect
-    # otel 变体仅在官方 stable 仓库已发布双架构 otel 模块时才构建
-    if: >-
-      needs.detect.outputs.should_build == 'true'
-      && github.repository_owner == 'blueapple168'
-      && (
-        (matrix.variant == 'stable' && needs.detect.outputs.build_stable == 'true')
-        || (matrix.variant == 'otel' && needs.detect.outputs.build_otel == 'true')
-      )
+    # 注意: if 表达式必须单行 —— YAML 折叠标量(>-)对更深缩进的行会保留换行,
+    # 多行嵌套括号会导致 GitHub 判定 workflow 文件无效 (run 45611004212 的教训)。
+    # otel 变体仅在官方 stable 仓库已发布双架构 otel 模块时才构建。
+    if: needs.detect.outputs.should_build == 'true' && github.repository_owner == 'blueapple168' && ((matrix.variant == 'stable' && needs.detect.outputs.build_stable == 'true') || (matrix.variant == 'otel' && needs.detect.outputs.build_otel == 'true'))
     # 只在本仓库跑, 避免 fork 后别人的 push 也触发构建/推送 ghcr。
     # 如需更稳的判定可换成数字 ID: github.repository_id == '<你的仓库数字ID>' (改名免疫)。
     runs-on: ${{ matrix.runner }}

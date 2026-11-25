@@ -1,0 +1,114 @@
+# =====================================================================
+# GHCR 镜像版本清理 workflow (手动触发)
+#
+# 用途: 删除 ghcr.io/blueapple168/nginx 中错误构建的镜像版本,
+#       例如旧检测逻辑误用 Mainline 版本 (1.31.10) 构建的产物。
+#       GITHUB_TOKEN (packages: write) 即可删除本仓库发布的包版本,
+#       无需用户另配 delete:packages PAT。
+#
+# 使用: Actions -> GHCR Cleanup -> Run workflow
+#   versions: 要删除的版本号, 逗号分隔, 如 "1.31.10" 或 "1.31.10,1.30.6"
+#
+# 删除规则 (对每个输入版本 v):
+#   - 删除 tags 中任一 tag == v 或以 "v-" 开头的包版本
+#     (覆盖 v-amd64 / v-arm64 / v-uos / v-uos-amd64 / v-otel-uos 等)
+#   - 若该版本还挂着浮动 tag (latest / otel-latest), 一并删除该条目
+#   - 同步删除远程 git tag nginx-v<v>
+# =====================================================================
+name: GHCR Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "要删除的镜像版本号 (逗号分隔, 如 1.31.10)"
+        required: true
+        default: ""
+
+permissions:
+  contents: write    # 删除远程 git tag
+  packages: write    # 删除 GHCR 包版本
+
+jobs:
+  cleanup:
+    name: Delete package versions & git tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.repository_owner == 'blueapple168'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Delete package versions and git tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSIONS: ${{ inputs.versions }}
+        run: |
+          set -euo pipefail
+          REPO="blueapple168/nginx"
+          API="https://api.github.com/user/packages/container/${REPO}/versions"
+
+          # 逗号/空白分隔 -> 版本数组
+          IFS=', ' read -r -a VERSION_ARRAY <<< "${VERSIONS}"
+          if [ -z "${VERSIONS// /}" ]; then
+            echo "::error::未指定要删除的版本号 (versions 输入为空)"
+            exit 1
+          fi
+
+          for VER in "${VERSION_ARRAY[@]}"; do
+            VER=$(echo "${VER}" | xargs)   # 去首尾空格
+            [ -z "${VER}" ] && continue
+            echo "::group::处理版本 ${VER}"
+
+            # 拉取全部包版本 (分页), 筛出 tags 命中该版本的条目
+            PAGE=1
+            DELETED=0
+            while : ; do
+              RESP=$(curl -fsSL --retry 3 \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "${API}?per_page=100&page=${PAGE}")
+              COUNT=$(echo "${RESP}" | jq 'length')
+              [ "${COUNT}" = "0" ] && break
+
+              # 命中规则: tag == VER 或 tag 以 "VER-" 开头,
+              # 或该版本挂着 latest/otel-latest 浮动 tag (即该版本的 manifest)
+              IDS=$(echo "${RESP}" | jq -r \
+                --arg v "${VER}" '
+                .[]
+                | select(any(.metadata.container.tags[];
+                    . == $v or startswith($v + "-") or . == "latest" or . == "otel-latest"))
+                | .id')
+              for ID in ${IDS}; do
+                TAGS=$(echo "${RESP}" | jq -r --argjson id "${ID}" \
+                  '.[] | select(.id == $id) | .metadata.container.tags | join(", ")')
+                echo "删除版本 id=${ID} tags=[${TAGS}]"
+                STATUS=$(curl -sSL --retry 3 -o /dev/null -w "%{http_code}" \
+                  -X DELETE \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  "${API}/${ID}")
+                if [ "${STATUS}" = "204" ]; then
+                  echo "  ✓ 删除成功 (204)"
+                  DELETED=$((DELETED + 1))
+                else
+                  echo "::warning::删除 id=${ID} 返回 HTTP ${STATUS}"
+                fi
+              done
+              PAGE=$((PAGE + 1))
+            done
+            echo "版本 ${VER} 共删除 ${DELETED} 个包版本条目"
+            echo "::endgroup::"
+
+            # 同步删除远程 git tag nginx-v<VER> (若存在)
+            if git ls-remote --tags origin | awk '{print $2}' \
+                | grep -Fxq "refs/tags/nginx-v${VER}"; then
+              git push origin ":refs/tags/nginx-v${VER}" \
+                && echo "✓ 已删除远程 git tag nginx-v${VER}" \
+                || echo "::warning::删除 git tag nginx-v${VER} 失败"
+            else
+              echo "远程无 git tag nginx-v${VER}, 跳过"
+            fi
+          done
+
+          echo "::notice::清理完成"
