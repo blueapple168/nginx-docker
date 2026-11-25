@@ -1,0 +1,317 @@
+# =====================================================================
+# 信创 (UOS) nginx stable 镜像专用构建与发布 workflow
+#
+# 结构参考 kafka 的 docker_build_and_publish_uos.yml:
+#   - matrix variant × platform: 2 个变体 × 2 个平台 = 4 个独立 job, 互不 cancel
+#       stable : nginx-stable/Dockerfile       ->  ${NGINX_VERSION}-uos
+#       otel   : nginx-stable-otel/Dockerfile  ->  ${NGINX_VERSION}-otel-uos
+#   - arm64 使用原生 ubuntu-24.04-arm runner (public 仓库免费), 不走 QEMU 模拟
+#   - 单平台 job 各自推 ${tag}-<arch>, 最后由 merge-manifest job 合成 multi-arch manifest
+#   - Trivy CVE 扫描 (仅出报告, 不阻断发布)
+#
+# 镜像仓库: ghcr.io/blueapple168/nginx
+#   stable 变体: <VER>-uos           + 浮动 tag latest
+#   otel   变体: <VER>-otel-uos      + 浮动 tag otel-latest
+#
+# 触发:
+#   1) schedule 每天 02:00 UTC 检测 nginx 官方 stable 是否有新版本
+#   2) workflow_dispatch 手动触发 (可指定 nginx_version 强制版本 / force_build 跳过 tag 检查)
+#   3) push 到 main 分支且 Dockerfile/配置/workflow 文件变更
+#
+# 版本判定: 用 git tag nginx-v<版本> 标记已构建版本; nginx.org 出新 stable 且无对应 tag 时才构建,
+#           构建推送成功后由 tag-release job 打 tag 完成闭环。
+# =====================================================================
+name: Docker Build and Publish (UOS nginx)
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: "强制使用的 nginx stable 版本 (如 1.30.6), 留空自动检测最新 stable"
+        required: false
+        default: ""
+      force_build:
+        description: "强制构建 (忽略已构建 tag 检查, 用于重推同版本镜像)"
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - "nginx-stable/**"
+      - "nginx-stable-otel/**"
+      - ".github/workflows/docker_build_and_publish_uos.yml"
+
+permissions:
+  contents: write    # tag-release job 打/推 git tag
+  packages: write    # 推送 GHCR 镜像
+
+env:
+  # nginx 镜像仓库集中维护; 变体 tag 后缀在 matrix.include 中定义
+  IMAGE_REPO: ghcr.io/blueapple168/nginx
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. 检测 nginx 官方最新 stable 版本, 决定是否需要构建
+  # ------------------------------------------------------------------
+  detect:
+    name: Detect latest nginx stable
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve nginx stable version
+        id: ver
+        env:
+          INPUT_VER: ${{ inputs.nginx_version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VER}" ]; then
+            VER="${INPUT_VER}"
+            echo "使用手动指定版本: ${VER}"
+          else
+            # 从 nginx.org 下载页解析 Stable version 区块中的版本号
+            VER=$(curl -fsSL --retry 3 https://nginx.org/en/download.html \
+              | sed -n '/Stable version/,/Mainline version/p' \
+              | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+' \
+              | head -n1 | cut -d- -f2)
+            if [ -z "${VER}" ]; then
+              echo "::error::无法从 nginx.org 解析出 stable 版本号"
+              exit 1
+            fi
+            echo "检测到最新 stable 版本: ${VER}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if already built
+        id: check
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          FORCE: ${{ inputs.force_build || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "${FORCE}" = "true" ]; then
+            echo "强制构建模式, 跳过版本 tag 检查"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 用 git tag nginx-v<版本> 标记已构建过的版本; 已存在则跳过
+          if git ls-remote --tags origin \
+              | awk '{print $2}' \
+              | grep -Fxq "refs/tags/nginx-v${VER}"; then
+            echo "nginx-v${VER} 已构建过, 跳过"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "nginx-v${VER} 尚未构建, 需要构建"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ------------------------------------------------------------------
+  # 2. 按变体 × 平台构建并推送单架构镜像
+  # ------------------------------------------------------------------
+  build-and-publish:
+    name: Build ${{ matrix.variant }} (${{ matrix.platform }})
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true' && github.repository_owner == 'blueapple168'
+    # 只在本仓库跑, 避免 fork 后别人的 push 也触发构建/推送 ghcr。
+    # 如需更稳的判定可换成数字 ID: github.repository_id == '<你的仓库数字ID>' (改名免疫)。
+    runs-on: ${{ matrix.runner }}
+    # 按目标平台选择 runner 架构, 全部原生构建, 不需要 QEMU:
+    #   linux/amd64 -> ubuntu-latest (x64)
+    #   linux/arm64 -> ubuntu-24.04-arm (arm64, public 仓库免费)
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [stable, otel]
+        platform: [linux/amd64, linux/arm64]
+        include:
+          # 变体 -> context / tag 后缀 / 浮动 tag
+          - variant: stable
+            context: nginx-stable
+            tag_suffix: -uos
+            floating_tag: latest
+          - variant: otel
+            context: nginx-stable-otel
+            tag_suffix: -otel-uos
+            floating_tag: otel-latest
+          # 平台 -> runner
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    concurrency:
+      # 不同 variant × platform 独立, 避免互相 cancel
+      group: nginx-publish-uos-${{ matrix.variant }}-${{ matrix.platform }}-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      VER: ${{ needs.detect.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags
+        id: image-tag
+        run: |
+          set -eux
+          # 最终 tag: ${VER}${tag_suffix}, 如 1.30.6-uos / 1.30.6-otel-uos
+          tag="${VER}${{ matrix.tag_suffix }}"
+          # 单平台临时 tag: ${tag}-<arch>, 由 merge-manifest job 合成 multi-arch manifest
+          platform_arch="${{ matrix.platform }}"
+          platform_arch="${platform_arch##*/}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "arch=${platform_arch}" >> "$GITHUB_OUTPUT"
+          echo "arch_tag=${tag}-${platform_arch}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (${{ matrix.variant }} / ${{ matrix.platform }})
+        id: build
+        run: |
+          set -eux
+          ARCH_TAG='${{ steps.image-tag.outputs.arch_tag }}'
+          echo "::group::Building variant=${{ matrix.variant }} platform=${{ matrix.platform }}"
+          # 单平台构建, 推到带架构后缀的临时 tag; merge job 再合成 multi-arch manifest。
+          # --metadata-file 收集本次构建的 digest, 供后续步骤引用。
+          docker buildx build \
+            --build-arg "OS_VERSION=20-1070a" \
+            --build-arg "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --platform "${{ matrix.platform }}" \
+            --tag "${IMAGE_REPO}:${ARCH_TAG}" \
+            --metadata-file "${GITHUB_WORKSPACE}/buildx-${ARCH_TAG}.json" \
+            --push \
+            "${{ matrix.context }}"
+          echo "::endgroup::"
+
+          digest=$(jq -r '."containerimage.digest"' "${GITHUB_WORKSPACE}/buildx-${ARCH_TAG}.json")
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "arch_tag=${ARCH_TAG}" >> "$GITHUB_OUTPUT"
+          echo "::notice::${IMAGE_REPO}:${ARCH_TAG} -> ${digest}"
+
+      - name: Run CVE scan (Trivy)
+        uses: lhotari/sandboxed-trivy-action@f01374b6cc3bf7264ab238293e94f6db7ada6dd0 # v1.0.2
+        with:
+          scan-type: 'image'
+          scan-ref: '${{ env.IMAGE_REPO }}:${{ steps.image-tag.outputs.arch_tag }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          output: 'scan_report_nginx_${{ matrix.variant }}_${{ steps.image-tag.outputs.arch }}.txt'
+          # exit-code '0': 扫描结果只作为报告产出, 不阻断发布 (由人工审查)。
+          exit-code: '0'
+          # 关键: 显式声明被扫描镜像的平台。action 内部会 docker pull + docker save,
+          # 不指定平台时 docker 按 runner 架构解析 manifest, 扫 arm64 镜像会报
+          #   no matching manifest for linux/amd64 in the manifest list entries
+          trivy-env: |
+            TRIVY_PLATFORM=${{ matrix.platform }}
+        env:
+          DOCKER_DEFAULT_PLATFORM: ${{ matrix.platform }}
+
+      - name: Upload CVE scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan_report_nginx_${{ matrix.variant }}_${{ steps.image-tag.outputs.arch }}.txt
+          path: scan_report_nginx_${{ matrix.variant }}_${{ steps.image-tag.outputs.arch }}.txt
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------
+  # 3. 把各平台推的 ${tag}-amd64 / ${tag}-arm64 合成 multi-arch manifest
+  # ------------------------------------------------------------------
+  merge-manifest:
+    name: Merge manifest (${{ matrix.variant }})
+    # always(): 某个变体的某个 arch 失败时, 不连带阻止其它变体的 manifest 合并
+    if: ${{ always() && needs.build-and-publish.result != 'skipped' && github.repository_owner == 'blueapple168' }}
+    needs: [detect, build-and-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [stable, otel]
+        include:
+          - variant: stable
+            tag_suffix: -uos
+            floating_tag: latest
+          - variant: otel
+            tag_suffix: -otel-uos
+            floating_tag: otel-latest
+    env:
+      VER: ${{ needs.detect.outputs.version }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        run: |
+          set -eux
+          image_tag="${VER}${{ matrix.tag_suffix }}"
+
+          # 逐个确认两个 arch tag 均已推送成功; 缺任一则跳过本变体的合并
+          # (另一个变体的 merge 仍会正常执行, 因为 job 之间相互独立)
+          missing=0
+          for arch in amd64 arm64; do
+            if ! docker buildx imagetools inspect "${IMAGE_REPO}:${image_tag}-${arch}" >/dev/null 2>&1; then
+              echo "::warning::${IMAGE_REPO}:${image_tag}-${arch} 不存在 (该平台构建可能失败), 跳过合并"
+              missing=1
+            fi
+          done
+          if [ "${missing}" = "1" ]; then
+            echo "::notice::variant=${{ matrix.variant }} 缺少平台镜像, 未生成 multi-arch manifest"
+            exit 0
+          fi
+
+          # 合成 linux/amd64 + linux/arm64 的 manifest list 到版本 tag 和浮动 tag
+          docker buildx imagetools create \
+            --tag "${IMAGE_REPO}:${image_tag}" \
+            --tag "${IMAGE_REPO}:${{ matrix.floating_tag }}" \
+            "${IMAGE_REPO}:${image_tag}-amd64" \
+            "${IMAGE_REPO}:${image_tag}-arm64"
+          echo "::notice::multi-arch manifest published: ${IMAGE_REPO}:${image_tag} (+ ${{ matrix.floating_tag }})"
+          docker buildx imagetools inspect "${IMAGE_REPO}:${image_tag}"
+
+  # ------------------------------------------------------------------
+  # 4. 构建成功后打 nginx-v<版本> tag, 下次定时检测即跳过该版本
+  # ------------------------------------------------------------------
+  tag-release:
+    name: Tag nginx-v${{ needs.detect.outputs.version }}
+    needs: [detect, merge-manifest]
+    if: needs.detect.outputs.should_build == 'true' && github.repository_owner == 'blueapple168'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Create version tag
+        env:
+          VER: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "nginx-v${VER}" -m "nginx stable ${VER} (nginx-stable + nginx-stable-otel, amd64/arm64)"
+          git push origin "nginx-v${VER}"
+          echo "::notice::tagged nginx-v${VER}"
