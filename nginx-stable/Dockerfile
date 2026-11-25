@@ -10,7 +10,7 @@ ARG OS_VERSION=20-1070a
 FROM --platform=$TARGETPLATFORM ghcr.io/blueapple168/uos-server-20-1070a:latest
 ARG OS_VERSION
 
-LABEL org.opencontainers.image.authors="baidongying@cnpc.com.cn" \
+LABEL org.opencontainers.image.authors="blueapple1120@qq.com" \
       org.opencontainers.image.version="1.0" \
       org.opencontainers.image.description="nginx-stable (UOS, multi-arch)" \
       os="UOS Linux" \
