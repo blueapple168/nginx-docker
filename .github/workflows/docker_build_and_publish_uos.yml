@@ -172,10 +172,12 @@ jobs:
   build-and-publish:
     name: Build ${{ matrix.variant }} (${{ matrix.platform }})
     needs: detect
-    # 注意: if 表达式必须单行 —— YAML 折叠标量(>-)对更深缩进的行会保留换行,
-    # 多行嵌套括号会导致 GitHub 判定 workflow 文件无效 (run 45611004212 的教训)。
-    # otel 变体仅在官方 stable 仓库已发布双架构 otel 模块时才构建。
-    if: needs.detect.outputs.should_build == 'true' && github.repository_owner == 'blueapple168' && ((matrix.variant == 'stable' && needs.detect.outputs.build_stable == 'true') || (matrix.variant == 'otel' && needs.detect.outputs.build_otel == 'true'))
+    # 注意1: jobs.<job_id>.if 的 context 不含 matrix (用了会 "Unrecognized named-value"
+    #        导致整个 workflow 文件无效, run 45611004212/45612474337 的教训)。
+    #        variant 开关改由 steps 级 if (支持 matrix+needs) 配合 enabled_ref 实现。
+    # 注意2: if 表达式必须单行 —— YAML 折叠标量(>-)对更深缩进的行会保留换行。
+    # otel 变体仅在官方 stable 仓库已发布双架构 otel 模块时才构建 (enabled_ref 下推到步骤)。
+    if: needs.detect.outputs.should_build == 'true' && github.repository_owner == 'blueapple168'
     # 只在本仓库跑, 避免 fork 后别人的 push 也触发构建/推送 ghcr。
     # 如需更稳的判定可换成数字 ID: github.repository_id == '<你的仓库数字ID>' (改名免疫)。
     runs-on: ${{ matrix.runner }}
@@ -189,15 +191,17 @@ jobs:
         variant: [stable, otel]
         platform: [linux/amd64, linux/arm64]
         include:
-          # 变体 -> context / tag 后缀 / 浮动 tag
+          # 变体 -> context / tag 后缀 / 浮动 tag / detect 输出开关名
           - variant: stable
             context: nginx-stable
             tag_suffix: -uos
             floating_tag: latest
+            enabled_ref: build_stable
           - variant: otel
             context: nginx-stable-otel
             tag_suffix: -otel-uos
             floating_tag: otel-latest
+            enabled_ref: build_otel
           # 平台 -> runner
           - platform: linux/amd64
             runner: ubuntu-latest
@@ -238,6 +242,7 @@ jobs:
 
       - name: Build and push (${{ matrix.variant }} / ${{ matrix.platform }})
         id: build
+        if: needs.detect.outputs[matrix.enabled_ref] == 'true'
         run: |
           set -eux
           ARCH_TAG='${{ steps.image-tag.outputs.arch_tag }}'
@@ -260,6 +265,7 @@ jobs:
           echo "::notice::${IMAGE_REPO}:${ARCH_TAG} -> ${digest}"
 
       - name: Run CVE scan (Trivy)
+        if: needs.detect.outputs[matrix.enabled_ref] == 'true'
         uses: lhotari/sandboxed-trivy-action@f01374b6cc3bf7264ab238293e94f6db7ada6dd0 # v1.0.2
         with:
           scan-type: 'image'
@@ -278,7 +284,7 @@ jobs:
           DOCKER_DEFAULT_PLATFORM: ${{ matrix.platform }}
 
       - name: Upload CVE scan report
-        if: always()
+        if: always() && needs.detect.outputs[matrix.enabled_ref] == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: scan_report_nginx_${{ matrix.variant }}_${{ steps.image-tag.outputs.arch }}.txt

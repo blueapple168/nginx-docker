@@ -45,8 +45,8 @@ jobs:
           VERSIONS: ${{ inputs.versions }}
         run: |
           set -euo pipefail
-          REPO="blueapple168/nginx"
-          API="https://api.github.com/user/packages/container/${REPO}/versions"
+          # 包名只取 "nginx" (user packages API 不带命名空间前缀)
+          API="https://api.github.com/user/packages/container/nginx/versions"
 
           # 逗号/空白分隔 -> 版本数组
           IFS=', ' read -r -a VERSION_ARRAY <<< "${VERSIONS}"
@@ -64,10 +64,11 @@ jobs:
             PAGE=1
             DELETED=0
             while : ; do
-              RESP=$(curl -fsSL --retry 3 \
+              # 包不存在或无版本时容忍 404 (视为空列表)
+              RESP=$(curl -sSL --retry 3 \
                 -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
-                "${API}?per_page=100&page=${PAGE}")
+                "${API}?per_page=100&page=${PAGE}" || echo "[]")
               COUNT=$(echo "${RESP}" | jq 'length')
               [ "${COUNT}" = "0" ] && break
 
