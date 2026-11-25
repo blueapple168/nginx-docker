@@ -121,17 +121,39 @@ jobs:
 
           # ---- 官方 stable yum 仓库包存在性校验 (构建前确认双架构 rpm 齐全) ----
           # 包文件名中的 "+" 会被 URL 编码为 %2B (如 nginx-module-otel-1.30.8+0.1.2-...)
+          # verify_rpm: 3 次重试拉取仓库列表做 grep; 主包另有 HEAD 请求兜底
+          #   (release 号惯例为 -1, 如 nginx-1.30.8-1.el8.ngx.x86_64.rpm)
+          verify_rpm() { # $1=arch  $2=ere pattern  $3=allow_head_fallback(true/false)
+            local arch="$1" pat="$2" allow_head="$3" attempt list code
+            for attempt in 1 2 3; do
+              list=$(curl -fsSL --retry 5 --retry-all-errors --max-time 60 \
+                      "https://nginx.org/packages/centos/8/${arch}/RPMS/" 2>/dev/null || true)
+              if [ -n "${list}" ] && echo "${list}" | grep -qE "${pat}"; then
+                return 0
+              fi
+              if [ "${allow_head}" = "true" ]; then
+                code=$(curl -sS -o /dev/null -w "%{http_code}" --retry 3 --retry-all-errors \
+                        --max-time 30 -I \
+                        "https://nginx.org/packages/centos/8/${arch}/RPMS/nginx-${VER}-1.el8.ngx.${arch}.rpm" \
+                        2>/dev/null || echo "000")
+                [ "${code}" = "200" ] && return 0
+              fi
+              echo "  第 ${attempt} 次校验未命中 (arch=${arch}), 列表字节数: $(echo -n "${list}" | wc -c)"
+              sleep 5
+            done
+            return 1
+          }
+
           BASE_STABLE=0
           OTEL_STABLE=0
           for arch in x86_64 aarch64; do
-            LIST=$(curl -fsSL --retry 3 "https://nginx.org/packages/centos/8/${arch}/RPMS/")
-            if echo "${LIST}" | grep -qE "nginx-${VER}-[0-9]+\.el8\.ngx\.${arch}\.rpm"; then
+            if verify_rpm "${arch}" "nginx-${VER}-[0-9]+\.el8\.ngx\.${arch}\.rpm" "true"; then
               echo "✓ nginx ${VER} 主包存在: ${arch}"
             else
-              echo "::error::nginx ${VER} 主包在官方 stable 仓库 ${arch} 架构下不存在"
+              echo "::error::nginx ${VER} 主包在官方 stable 仓库 ${arch} 架构下不存在 (已重试)"
               exit 1
             fi
-            if echo "${LIST}" | grep -qE "nginx-module-otel-${VER}%2B[0-9.]+-[0-9]+\.el8\.ngx\.${arch}\.rpm"; then
+            if verify_rpm "${arch}" "nginx-module-otel-${VER}%2B[0-9.]+-[0-9]+\.el8\.ngx\.${arch}\.rpm" "false"; then
               echo "✓ nginx-module-otel ${VER} 存在: ${arch}"
               OTEL_STABLE=$((OTEL_STABLE + 1))
             else
