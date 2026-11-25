@@ -18,8 +18,9 @@
 #   2) workflow_dispatch 手动触发 (可指定 nginx_version 强制版本 / force_build 跳过 tag 检查)
 #   3) push 到 main 分支且 Dockerfile/配置/workflow 文件变更
 #
-# 版本判定: 用 git tag nginx-v<版本> 标记已构建版本; nginx.org 出新 stable 且无对应 tag 时才构建,
-#           构建推送成功后由 tag-release job 打 tag 完成闭环。
+# 版本判定: 只跟踪 nginx 官方 Stable 分支 (严格解析 download.html 的 "Stable version" 区块,
+#           显式排除 Mainline/Legacy), 并校验官方 stable yum 仓库双架构 rpm (含 otel 模块) 齐全;
+#           用 git tag nginx-v<版本> 标记已构建版本, 新 Stable 版本才构建, 成功后自动打 tag 闭环。
 # =====================================================================
 name: Docker Build and Publish (UOS nginx)
 
@@ -63,11 +64,13 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
       should_build: ${{ steps.check.outputs.should_build }}
+      build_stable: ${{ steps.ver.outputs.build_stable }}
+      build_otel: ${{ steps.ver.outputs.build_otel }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Resolve nginx stable version
+      - name: Resolve nginx stable version (official Stable only)
         id: ver
         env:
           INPUT_VER: ${{ inputs.nginx_version }}
@@ -77,18 +80,68 @@ jobs:
             VER="${INPUT_VER}"
             echo "使用手动指定版本: ${VER}"
           else
-            # 从 nginx.org 下载页解析 Stable version 区块中的版本号
-            VER=$(curl -fsSL --retry 3 https://nginx.org/en/download.html \
-              | sed -n '/Stable version/,/Mainline version/p' \
-              | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+' \
-              | head -n1 | cut -d- -f2)
+            # 只跟踪 nginx 官方 Stable 分支：
+            # 从 https://nginx.org/en/download.html 的 "Stable version" 区块严格解析版本号。
+            # 注意页面结构: Mainline 在 Stable 之前、Legacy 在 Stable 之后，
+            # 逐行扫描并在命中锚点后截取到下一个 <h4> 为止，保证不会误取 Mainline/Legacy。
+            curl -fsSL --retry 3 https://nginx.org/en/download.html -o /tmp/download.html
+            parse_section() {
+              awk -v anchor="$1" '{
+                if (found) {
+                  if (index($0, "<h4>") > 0) { exit }
+                  buf = buf $0
+                  next
+                }
+                if (index($0, anchor) > 0) {
+                  found = 1
+                  rest = substr($0, index($0, anchor))
+                  e = index(rest, "<h4>")
+                  buf = (e > 0) ? substr(rest, 1, e - 1) : rest
+                }
+              }
+              END {
+                if (found && match(buf, /nginx-[0-9]+\.[0-9]+\.[0-9]+/))
+                  print substr(buf, RSTART + 6, RLENGTH - 6)
+              }' /tmp/download.html
+            }
+            VER=$(parse_section "Stable version")
+            MAINLINE=$(parse_section "Mainline version")
+            echo "官方 Mainline(仅参考, 不跟踪): ${MAINLINE:-unknown}"
             if [ -z "${VER}" ]; then
-              echo "::error::无法从 nginx.org 解析出 stable 版本号"
+              echo "::error::无法从 nginx.org 解析出 Stable version 区块版本号"
               exit 1
             fi
-            echo "检测到最新 stable 版本: ${VER}"
+            if [ "${VER}" = "${MAINLINE}" ]; then
+              echo "::error::解析异常: Stable 与 Mainline 版本号相同 (${VER}), 拒绝构建"
+              exit 1
+            fi
+            echo "检测到官方最新 Stable 版本: ${VER}"
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+          # ---- 官方 stable yum 仓库包存在性校验 (构建前确认双架构 rpm 齐全) ----
+          # 包文件名中的 "+" 会被 URL 编码为 %2B (如 nginx-module-otel-1.30.8+0.1.2-...)
+          BASE_STABLE=0
+          OTEL_STABLE=0
+          for arch in x86_64 aarch64; do
+            LIST=$(curl -fsSL --retry 3 "https://nginx.org/packages/centos/8/${arch}/RPMS/")
+            if echo "${LIST}" | grep -qE "nginx-${VER}-[0-9]+\.el8\.ngx\.${arch}\.rpm"; then
+              echo "✓ nginx ${VER} 主包存在: ${arch}"
+            else
+              echo "::error::nginx ${VER} 主包在官方 stable 仓库 ${arch} 架构下不存在"
+              exit 1
+            fi
+            if echo "${LIST}" | grep -qE "nginx-module-otel-${VER}%2B[0-9.]+-[0-9]+\.el8\.ngx\.${arch}\.rpm"; then
+              echo "✓ nginx-module-otel ${VER} 存在: ${arch}"
+              OTEL_STABLE=$((OTEL_STABLE + 1))
+            else
+              echo "::warning::nginx-module-otel ${VER} 在官方 stable 仓库 ${arch} 架构下暂未发布"
+            fi
+          done
+          # 主包双架构齐全 -> 构建 stable 变体; otel 模块双架构齐全 -> 构建 otel 变体
+          [ "${OTEL_STABLE}" = "2" ] && BUILD_OTEL=true || BUILD_OTEL=false
+          echo "build_stable=true" >> "$GITHUB_OUTPUT"
+          echo "build_otel=${BUILD_OTEL}" >> "$GITHUB_OUTPUT"
 
       - name: Check if already built
         id: check
@@ -119,7 +172,14 @@ jobs:
   build-and-publish:
     name: Build ${{ matrix.variant }} (${{ matrix.platform }})
     needs: detect
-    if: needs.detect.outputs.should_build == 'true' && github.repository_owner == 'blueapple168'
+    # otel 变体仅在官方 stable 仓库已发布双架构 otel 模块时才构建
+    if: >-
+      needs.detect.outputs.should_build == 'true'
+      && github.repository_owner == 'blueapple168'
+      && (
+        (matrix.variant == 'stable' && needs.detect.outputs.build_stable == 'true')
+        || (matrix.variant == 'otel' && needs.detect.outputs.build_otel == 'true')
+      )
     # 只在本仓库跑, 避免 fork 后别人的 push 也触发构建/推送 ghcr。
     # 如需更稳的判定可换成数字 ID: github.repository_id == '<你的仓库数字ID>' (改名免疫)。
     runs-on: ${{ matrix.runner }}

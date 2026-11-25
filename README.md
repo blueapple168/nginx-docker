@@ -29,11 +29,12 @@ UOS Server 基础镜像 + nginx 官方 stable 版本的多架构（`linux/amd64`
 
 基础镜像：`ghcr.io/blueapple168/uos-server-20-1070a:latest`（UOS Server 20，RHEL 8 兼容，glibc 2.28，需同时含 amd64/arm64 架构）。
 
-## 版本触发机制
+## 版本触发机制（只跟踪官方 Stable 分支）
 
-1. Workflow 每天 `02:00 UTC` 定时运行，抓取 `https://nginx.org/en/download.html` 解析 **Stable version** 区块的最新版本号；
-2. 与仓库中的 git tag `nginx-v<版本>` 比对——不存在则认为有新版本，触发构建；
-3. 构建成功后自动打 tag `nginx-v<版本>`，下次不再重复构建。
+1. Workflow 每天 `02:00 UTC` 定时运行，抓取 `https://nginx.org/en/download.html`，**严格解析 "Stable version" 区块**的版本号（逐行扫描 + 区块截断，显式排除 Mainline 和 Legacy versions，并断言 Stable ≠ Mainline）；
+2. 构建前校验官方 stable yum 仓库 `packages/centos/8/{x86_64,aarch64}/RPMS/` 中该版本的 rpm 齐全——主包缺任一架构即失败；`nginx-module-otel` 双架构齐全才构建 otel 变体，否则跳过 otel 只构建 stable；
+3. 与仓库中的 git tag `nginx-v<版本>` 比对——不存在则认为有新版本，触发构建；
+4. 构建成功后自动打 tag `nginx-v<版本>`，下次不再重复构建。
 
 手动触发：Actions → *Docker Build and Publish (UOS nginx)* → *Run workflow*
 - `nginx_version`：指定版本（如 `1.30.6`），留空自动检测；
