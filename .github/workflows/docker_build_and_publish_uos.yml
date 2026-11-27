@@ -426,6 +426,13 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "nginx-v${VER}" -m "nginx stable ${VER} (nginx-stable + nginx-stable-otel, amd64/arm64)"
+          # 幂等: force_build 重跑同版本时 tag 已存在, 跳过 push 而不是失败 (run 45953821607)
+          if git ls-remote --tags origin \
+              | awk '{print $2}' \
+              | grep -Fxq "refs/tags/nginx-v${VER}"; then
+            echo "::notice::nginx-v${VER} 已存在, 跳过打 tag"
+            exit 0
+          fi
+          git tag -a "nginx-v${VER}" -m "nginx stable ${VER} (nginx-stable + nginx-stable-otel + nginx-check-fair, amd64/arm64)"
           git push origin "nginx-v${VER}"
           echo "::notice::tagged nginx-v${VER}"
