@@ -44,6 +44,7 @@ on:
     paths:
       - "nginx-stable/**"
       - "nginx-stable-otel/**"
+      - "nginx-check-fair/**"
       - ".github/workflows/docker_build_and_publish_uos.yml"
 
 permissions:
@@ -227,7 +228,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [stable, otel]
+        # variant 必须把所有值列在顶层数组; 只写在 include 里会生成缺少 platform/runner
+        # 的孤儿组合 (runs-on 为空), matrix 展开报错, 整个 build job 创建失败
+        # (run 45947452245 的教训)。
+        variant: [stable, otel, check-fair]
         platform: [linux/amd64, linux/arm64]
         include:
           # 变体 -> context / tag 后缀 / 浮动 tag / detect 输出开关名
@@ -351,7 +355,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [stable, otel]
+        variant: [stable, otel, check-fair]
         include:
           - variant: stable
             tag_suffix: -uos
