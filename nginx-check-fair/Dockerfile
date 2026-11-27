@@ -90,7 +90,7 @@ RUN set -eux; \
     #   2. cc-opt 中 -specs=redhat-hardened-cc1/annobin-cc1 依赖 redhat-rpm-config/annobin
     #      包, 基础镜像不含, 去掉
     #   3. -m64/-fcf-protection 为 x86 专属 flag, aarch64 gcc 不识别, 按 TARGETARCH 分支
-    CC_OPT_COMMON="-O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -fasynchronous-unwind-tables -fstack-clash-protection -fPIC" \
+    CC_OPT_COMMON="-O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -fasynchronous-unwind-tables -fstack-clash-protection -fPIC"; \
     case "${TARGETARCH}" in \
         amd64) CC_OPT_ARCH="-m64 -mtune=generic -fcf-protection" ;; \
         arm64) CC_OPT_ARCH="-mtune=generic" ;; \
