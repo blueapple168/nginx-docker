@@ -170,8 +170,8 @@ jobs:
           BUILD_CHECK_FAIR=true
           for u in \
             "https://nginx.org/download/nginx-${VER}.tar.gz" \
-            "https://codeload.github.com/yaoweibin/nginx_upstream_check_module/tar.gz/refs/tags/v0.4.0" \
-            "https://codeload.github.com/Akvicor/nginx-upstream-fair/tar.gz/refs/heads/master"; do
+            "https://codeload.github.com/yaoweibin/nginx_upstream_check_module/tar.gz/refs/heads/master" \
+            "https://codeload.github.com/gnosek/nginx-upstream-fair/tar.gz/refs/heads/master"; do
             c=$(curl -sS -o /dev/null -w "%{http_code}" --retry 3 --retry-all-errors --max-time 30 -I "$u" 2>/dev/null || echo "000")
             if [ "$c" != "200" ] && [ "$c" != "302" ]; then
               echo "::warning::check-fair 源码不可达 (HTTP ${c}): ${u}"

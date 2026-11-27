@@ -10,19 +10,18 @@
 #   - check 模块: yaoweibin/nginx_upstream_check_module v0.4.0,
 #     nginx 新版本 (1.26/1.28 实测) 使用 check_1.20.1+.patch;
 #     补丁版本必须 "不高于 nginx 版本且最接近", 否则编译报错。
-#   - fair 模块: gnosek 原版对 nginx>=1.14 编译报错 (需手工打 PR#27 修复),
-#     改用 Akvicor/nginx-upstream-fair 维护版 (已含动态模块/OpenSSL 1.1+/新 API 兼容),
-#     直接 --add-module, 无需额外补丁。
+#   - fair 模块: gnosek 原版对 nginx>=1.14 编译报错, 采用 blueapple168/nginx-curl
+#     项目 (nginx_upstream_check_fair/1.20.0) 验证过的修复方法:
+#     sed 's/default_port/no_port/g' ngx_http_upstream_fair_module.c (等价 PR#27)
+#   - check 模块与 fair 模块均取 GitHub master 源码 (与 nginx-curl 项目同源)
 #   - 不选 Tengine: 其内置 check 但无 fair, 且与 nginx stable 1.30.x 生态不对齐。
 #
 # 构建参数 (build-args 可覆盖):
 #   NGINX_VERSION  nginx 源码版本, 默认 1.30.8 (与 stable 系列对齐)
-#   CHECK_REF      check 模块 tag, 默认 v0.4.0
 #   CHECK_PATCH    check 补丁文件名 (tarball 内字面文件名), 默认 check_1.20.1+
 #                  patch 失败时按 nginx 版本就近调整, 如 check_1.22.1+
 # =====================================================================
 ARG NGINX_VERSION=1.30.8
-ARG CHECK_REF=v0.4.0
 ARG CHECK_PATCH=check_1.20.1+.patch
 
 # 基础镜像: ghcr.io/blueapple168/uos-server-20-1070a (UOS Server 20, RHEL 8 兼容, glibc 2.28)
@@ -41,7 +40,6 @@ LABEL org.opencontainers.image.authors="blueapple" \
 ARG TARGETARCH
 
 ARG NGINX_VERSION
-ARG CHECK_REF
 ARG CHECK_PATCH
 
 ENV NGINX_VERSION=${NGINX_VERSION} \
@@ -67,12 +65,14 @@ RUN set -eux; \
     cd /usr/src; \
     curl -fsSL --retry 3 "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -o nginx.tar.gz; \
     tar zxf nginx.tar.gz; \
-    curl -fsSL --retry 3 "https://codeload.github.com/yaoweibin/nginx_upstream_check_module/tar.gz/refs/tags/${CHECK_REF}" -o check.tar.gz; \
+    curl -fsSL --retry 3 "https://codeload.github.com/yaoweibin/nginx_upstream_check_module/tar.gz/refs/heads/master" -o check.tar.gz; \
     tar zxf check.tar.gz; \
     CHECK_DIR=$(ls -d nginx_upstream_check_module-* | head -n1); \
-    curl -fsSL --retry 3 "https://codeload.github.com/Akvicor/nginx-upstream-fair/tar.gz/refs/heads/master" -o fair.tar.gz; \
+    curl -fsSL --retry 3 "https://codeload.github.com/gnosek/nginx-upstream-fair/tar.gz/refs/heads/master" -o fair.tar.gz; \
     tar zxf fair.tar.gz; \
     FAIR_DIR=$(ls -d nginx-upstream-fair-* | head -n1); \
+    # gnosek 原版对 nginx>=1.14 的 default_port 编译报错, 按 nginx-curl 项目验证过的方法修复
+    sed -i 's/default_port/no_port/g' "/usr/src/${FAIR_DIR}/ngx_http_upstream_fair_module.c"; \
     \
     # ---------- 给 nginx 源码打 check 补丁 (失败即中断, 换 CHECK_PATCH 重试) ----------
     cd "nginx-${NGINX_VERSION}"; \
