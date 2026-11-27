@@ -83,39 +83,59 @@ RUN set -eux; \
         echo "CHECK_PATCH=${CHECK_PATCH} 不存在, 用 --build-arg CHECK_PATCH=<?> 调整" >&2; exit 1; \
     fi; \
     \
-    # ---------- configure: 路径布局对齐官方 RPM, 静态编译 check + fair ----------
-    # cc-opt 不带 -m64 (aarch64 gcc 不识别), 多架构通用
+    # ---------- configure: 完整对齐官方 el8 RPM (nginx 1.30.8-1) 编译参数 ----------
+    # 差异说明:
+    #   1. --with-http_v3_module 去掉: QUIC 需 OpenSSL 3.x, 基础镜像 OpenSSL 1.1.1k 下
+    #      configure 直接失败 (官方 el8 包由 nginx.org 特殊构建)
+    #   2. cc-opt 中 -specs=redhat-hardened-cc1/annobin-cc1 依赖 redhat-rpm-config/annobin
+    #      包, 基础镜像不含, 去掉
+    #   3. -m64/-fcf-protection 为 x86 专属 flag, aarch64 gcc 不识别, 按 TARGETARCH 分支
+    CC_OPT_COMMON="-O2 -g -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fexceptions -fstack-protector-strong -grecord-gcc-switches -fasynchronous-unwind-tables -fstack-clash-protection -fPIC"
+    case "${TARGETARCH}" in \
+        amd64) CC_OPT_ARCH="-m64 -mtune=generic -fcf-protection" ;; \
+        arm64) CC_OPT_ARCH="-mtune=generic" ;; \
+    esac; \
     ./configure \
-        --prefix=/usr/share/nginx \
+        --prefix=/etc/nginx \
         --sbin-path=/usr/sbin/nginx \
         --modules-path=/usr/lib64/nginx/modules \
         --conf-path=/etc/nginx/nginx.conf \
         --error-log-path=/var/log/nginx/error.log \
         --http-log-path=/var/log/nginx/access.log \
-        --pid-path=/run/nginx.pid \
-        --lock-path=/run/lock/subsys/nginx \
+        --pid-path=/var/run/nginx.pid \
+        --lock-path=/var/run/nginx.lock \
+        --http-client-body-temp-path=/var/cache/nginx/client_temp \
+        --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+        --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+        --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+        --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
         --user=nginx --group=nginx \
         --with-compat \
-        --with-threads \
         --with-file-aio \
-        --with-http_ssl_module \
-        --with-http_v2_module \
-        --with-http_realip_module \
-        --with-http_stub_status_module \
-        --with-http_gzip_static_module \
-        --with-http_sub_module \
+        --with-threads \
         --with-http_addition_module \
         --with-http_auth_request_module \
+        --with-http_dav_module \
+        --with-http_flv_module \
+        --with-http_gunzip_module \
+        --with-http_gzip_static_module \
+        --with-http_mp4_module \
         --with-http_random_index_module \
+        --with-http_realip_module \
         --with-http_secure_link_module \
-        --with-http_degradation_module \
         --with-http_slice_module \
+        --with-http_ssl_module \
+        --with-http_stub_status_module \
+        --with-http_sub_module \
+        --with-http_v2_module \
+        --with-mail \
+        --with-mail_ssl_module \
         --with-stream \
         --with-stream_realip_module \
         --with-stream_ssl_module \
         --with-stream_ssl_preread_module \
-        --with-cc-opt='-O2 -g -fstack-protector-strong -fPIC' \
-        --with-ld-opt='-Wl,-z,relro -Wl,-z,now' \
+        --with-cc-opt="${CC_OPT_COMMON} ${CC_OPT_ARCH}" \
+        --with-ld-opt='-Wl,-z,relro -Wl,-z,now -pie' \
         --add-module="/usr/src/${CHECK_DIR}" \
         --add-module="/usr/src/${FAIR_DIR}"; \
     \
@@ -134,6 +154,12 @@ RUN set -eux; \
         useradd -r -g nginx -s /sbin/nologin -d /var/cache/nginx nginx; \
     fi; \
     mkdir -p /var/cache/nginx/client_temp /var/run/nginx /usr/share/nginx/html; \
+    # prefix=/etc/nginx 时 make install 会把 html 放到 /etc/nginx/html, 迁移到标准位置
+    if [ -d /etc/nginx/html ]; then \
+        cp -r /etc/nginx/html/50x.html /usr/share/nginx/html/ 2>/dev/null || true; \
+        rm -rf /etc/nginx/html; \
+        ln -s /usr/share/nginx/html /etc/nginx/html; \
+    fi; \
     ln -sf /dev/stdout /var/log/nginx/access.log; \
     ln -sf /dev/stderr /var/log/nginx/error.log; \
     chown -R nginx:nginx /var/cache/nginx; \
