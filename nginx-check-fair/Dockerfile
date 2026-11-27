@@ -56,6 +56,9 @@ RUN set -eux; \
     esac; \
     \
     # ---------- 编译依赖 ----------
+    # UOS 企业源 URL 中的 $StateMode 变量在容器内未定义, 请求落到字面量路径导致 401;
+    # 参照 docker-library-redis/8.8-uos 的做法替换为有效状态值 ufu
+    sed -i 's/\$StateMode/ufu/g' /etc/yum.repos.d/*.repo; \
     yum makecache; \
     yum install -y --setopt=install_weak_deps=false --nodocs \
         gcc gcc-c++ make patch curl tar gzip; \
