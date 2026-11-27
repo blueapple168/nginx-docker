@@ -10,13 +10,17 @@ UOS Server 基础镜像 + nginx 官方 stable 版本的多架构（`linux/amd64`
 ├── nginx-stable/                        # 变体 1：nginx-stable（x86 + arm64 合并为一个 Dockerfile）
 │   ├── Dockerfile
 │   └── default.conf
-└── nginx-stable-otel/                   # 变体 2：nginx-stable-otel（含 otel/njs/image-filter/xslt 模块）
+├── nginx-stable-otel/                   # 变体 2：nginx-stable-otel（含 otel/njs/image-filter/xslt 模块）
+│   ├── Dockerfile
+│   ├── default.conf
+│   └── nginx.conf
+└── nginx-check-fair/                    # 变体 3：源码编译 upstream_check(主动健康检查) + upstream_fair(忙闲调度)
     ├── Dockerfile
     ├── default.conf
     └── nginx.conf
 ```
 
-## 产物（共 2 套镜像 × 2 架构）
+## 产物（共 3 套镜像 × 2 架构）
 
 镜像仓库：`ghcr.io/blueapple168/nginx`
 
@@ -24,6 +28,7 @@ UOS Server 基础镜像 + nginx 官方 stable 版本的多架构（`linux/amd64`
 |---|---|---|---|
 | stable | `<版本>-uos`（如 `1.30.6-uos`） | `latest` | linux/amd64, linux/arm64 |
 | otel | `<版本>-otel-uos`（如 `1.30.6-otel-uos`） | `otel-latest` | linux/amd64, linux/arm64 |
+| check-fair | `<版本>-check-fair-uos`（如 `1.30.8-check-fair-uos`） | `check-fair-latest` | linux/amd64, linux/arm64 |
 
 构建过程会先推送单架构临时 tag（`<最终tag>-amd64` / `<最终tag>-arm64`），再由 merge job 用 `docker buildx imagetools create` 合成 multi-arch manifest；`docker pull` / `docker run` 按宿主机架构自动选择。
 
@@ -32,7 +37,7 @@ UOS Server 基础镜像 + nginx 官方 stable 版本的多架构（`linux/amd64`
 ## 版本触发机制（只跟踪官方 Stable 分支）
 
 1. Workflow 每天 `02:00 UTC` 定时运行，抓取 `https://nginx.org/en/download.html`，**严格解析 "Stable version" 区块**的版本号（逐行扫描 + 区块截断，显式排除 Mainline 和 Legacy versions，并断言 Stable ≠ Mainline）；
-2. 构建前校验官方 stable yum 仓库 `packages/centos/8/{x86_64,aarch64}/RPMS/` 中该版本的 rpm 齐全——主包缺任一架构即失败；`nginx-module-otel` 双架构齐全才构建 otel 变体，否则跳过 otel 只构建 stable；
+2. 构建前校验官方 stable yum 仓库 `packages/centos/8/{x86_64,aarch64}/RPMS/` 中该版本的 rpm 齐全——主包缺任一架构即失败；`nginx-module-otel` 双架构齐全才构建 otel 变体，否则跳过 otel 只构建 stable；check-fair 变体校验三个源码 URL（nginx.org 源码包 + 两个 GitHub 模块）可达后才构建；
 3. 与仓库中的 git tag `nginx-v<版本>` 比对——不存在则认为有新版本，触发构建；
 4. 构建成功后自动打 tag `nginx-v<版本>`，下次不再重复构建。
 
@@ -45,7 +50,7 @@ UOS Server 基础镜像 + nginx 官方 stable 版本的多架构（`linux/amd64`
 | Job | 作用 |
 |---|---|
 | `detect` | 解析 nginx 最新 stable 版本，比对 git tag 决定是否构建 |
-| `build-and-publish` | matrix：`variant(stable/otel) × platform(amd64/arm64)` = 4 个独立 job；amd64→`ubuntu-latest`，arm64→`ubuntu-24.04-arm` 原生 runner（public 仓库免费，不用 QEMU）；推单架构 tag 后跑 Trivy 扫描（出报告不阻断） |
+| `build-and-publish` | matrix：`variant(stable/otel/check-fair) × platform(amd64/arm64)` = 6 个独立 job；amd64→`ubuntu-latest`，arm64→`ubuntu-24.04-arm` 原生 runner（public 仓库免费，不用 QEMU）；推单架构 tag 后跑 Trivy 扫描（出报告不阻断） |
 | `merge-manifest` | 校验两个 arch tag 都存在后，`imagetools create` 合成 multi-arch manifest 到版本 tag + 浮动 tag；`always()` 保证单变体失败不影响另一变体 |
 | `tag-release` | 构建成功后打 `nginx-v<版本>`，完成版本闭环 |
 

@@ -66,6 +66,7 @@ jobs:
       should_build: ${{ steps.check.outputs.should_build }}
       build_stable: ${{ steps.ver.outputs.build_stable }}
       build_otel: ${{ steps.ver.outputs.build_otel }}
+      build_check_fair: ${{ steps.ver.outputs.build_check_fair }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -165,6 +166,22 @@ jobs:
           echo "build_stable=true" >> "$GITHUB_OUTPUT"
           echo "build_otel=${BUILD_OTEL}" >> "$GITHUB_OUTPUT"
 
+          # ---- check-fair 变体: 源码 URL 可达性校验 (该变体为源码编译, 构建前确认三个源均可下载) ----
+          BUILD_CHECK_FAIR=true
+          for u in \
+            "https://nginx.org/download/nginx-${VER}.tar.gz" \
+            "https://codeload.github.com/yaoweibin/nginx_upstream_check_module/tar.gz/refs/tags/v0.4.0" \
+            "https://codeload.github.com/Akvicor/nginx-upstream-fair/tar.gz/refs/heads/master"; do
+            c=$(curl -sS -o /dev/null -w "%{http_code}" --retry 3 --retry-all-errors --max-time 30 -I "$u" 2>/dev/null || echo "000")
+            if [ "$c" != "200" ] && [ "$c" != "302" ]; then
+              echo "::warning::check-fair 源码不可达 (HTTP ${c}): ${u}"
+              BUILD_CHECK_FAIR=false
+            else
+              echo "✓ check-fair 源可达 (HTTP ${c}): ${u}"
+            fi
+          done
+          echo "build_check_fair=${BUILD_CHECK_FAIR}" >> "$GITHUB_OUTPUT"
+
       - name: Check if already built
         id: check
         env:
@@ -224,6 +241,12 @@ jobs:
             tag_suffix: -otel-uos
             floating_tag: otel-latest
             enabled_ref: build_otel
+          # check-fair: 源码编译 upstream_check + upstream_fair (构建耗时较长)
+          - variant: check-fair
+            context: nginx-check-fair
+            tag_suffix: -check-fair-uos
+            floating_tag: check-fair-latest
+            enabled_ref: build_check_fair
           # 平台 -> runner
           - platform: linux/amd64
             runner: ubuntu-latest
@@ -336,6 +359,9 @@ jobs:
           - variant: otel
             tag_suffix: -otel-uos
             floating_tag: otel-latest
+          - variant: check-fair
+            tag_suffix: -check-fair-uos
+            floating_tag: check-fair-latest
     env:
       VER: ${{ needs.detect.outputs.version }}
     steps:
