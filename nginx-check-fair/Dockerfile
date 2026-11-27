@@ -61,7 +61,8 @@ RUN set -eux; \
     sed -i 's/\$StateMode/ufu/g' /etc/yum.repos.d/*.repo; \
     yum makecache; \
     yum install -y --setopt=install_weak_deps=false --nodocs \
-        gcc gcc-c++ make patch curl tar gzip; \
+        gcc gcc-c++ make patch curl tar gzip \
+        pcre-devel openssl-devel zlib-devel; \
     \
     # ---------- 下载源码与模块 ----------
     mkdir -p /usr/src; \
@@ -172,7 +173,7 @@ RUN set -eux; \
     rm -rf /usr/src/nginx* /usr/src/check* /usr/src/fair* \
            /var/cache/yum/* /var/tmp/* /tmp/*; \
     yum clean all; \
-    yum -y remove gcc gcc-c++ make patch; \
+    yum -y remove gcc gcc-c++ make patch pcre-devel openssl-devel zlib-devel; \
     yum autoremove -y --setopt=install_weak_deps=false || true; \
     rm -rf /var/log/*.log /usr/share/man/* /usr/share/doc/*; \
     if [ -f /usr/lib/python3.6/site-packages/setuptools-39.2.0.dist-info/METADATA ]; then \
